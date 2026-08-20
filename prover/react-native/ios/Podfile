@@ -1,0 +1,72 @@
+ENV['RCT_NEW_ARCH_ENABLED'] = '1'
+
+# Resolve react_native_pods.rb with node to allow for hoisting
+require Pod::Executable.execute_command('node', ['-p',
+  'require.resolve(
+    "react-native/scripts/react_native_pods.rb",
+    {paths: [process.argv[1]]},
+  )', __dir__]).strip
+
+platform :ios, min_ios_version_supported
+prepare_react_native_project!
+
+linkage = ENV['USE_FRAMEWORKS']
+if linkage != nil
+  Pod::UI.puts "Configuring Pod with #{linkage}ally linked Frameworks".green
+  use_frameworks! :linkage => linkage.to_sym
+end
+
+target 'MyTestLibraryExample' do
+  config = use_native_modules!
+
+  use_react_native!(
+    :path => config[:reactNativePath],
+    # An absolute path to your application root.
+    :app_path => "#{Pod::Config.instance.installation_root}/.."
+  )
+
+  post_install do |installer|
+    # https://github.com/facebook/react-native/blob/main/packages/react-native/scripts/react_native_pods.rb#L197-L202
+    react_native_post_install(
+      installer,
+      config[:reactNativePath],
+      :mac_catalyst_enabled => false,
+      # :ccache_enabled => true
+    )
+
+    # Work around fmt's FMT_COMPILE_STRING consteval constructors failing to
+    # compile as constant expressions under newer/stricter Clang (e.g. Xcode
+    # 26.5). fmt/include/fmt/base.h unconditionally re-#defines FMT_CONSTEVAL
+    # based on its own Clang-version detection, so a command-line -D can't
+    # override it — patch the header directly to force it off.
+    fmt_header = installer.sandbox.pod_dir('fmt') + 'include/fmt/base.h'
+    if File.exist?(fmt_header)
+      contents = File.read(fmt_header)
+      marker = '// Patched: force-disable fmt consteval (Xcode 26.5 Clang incompatibility)'
+      unless contents.include?(marker)
+        original = <<~OLD
+          #if FMT_USE_CONSTEVAL
+          #  define FMT_CONSTEVAL consteval
+          #  define FMT_CONSTEXPR20 constexpr
+          #else
+          #  define FMT_CONSTEVAL
+          #  define FMT_CONSTEXPR20
+          #endif
+        OLD
+        replacement = <<~NEW
+          #{marker}
+          #define FMT_CONSTEVAL
+          #define FMT_CONSTEXPR20
+        NEW
+        patched = contents.sub(original, replacement)
+        if patched == contents
+          Pod::UI.warn 'fmt base.h consteval patch did not apply (source layout changed?) — Yoga/glog/fmt may fail to build.'
+        else
+          File.chmod(0644, fmt_header)
+          File.write(fmt_header, patched)
+          File.chmod(0444, fmt_header)
+        end
+      end
+    end
+  end
+end
